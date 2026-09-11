@@ -1,0 +1,101 @@
+name: reconcile
+
+# TRUSTED. workflow_run always uses this file as it exists on the default
+# branch; a pull request cannot change what runs here.
+#
+# Rules this job obeys:
+#   - No actions/checkout. Nothing from the pull request is on disk, so nothing
+#     from the pull request can execute. The first step proves the workspace is
+#     empty.
+#   - The artifact is downloaded by the triggering run's id, into RUNNER_TEMP
+#     (outside the workspace), and read as JSON data only.
+#   - Attacker-controllable values (branch names, titles) are never interpolated
+#     into a script. Only the head SHA and run id are used, and only via env.
+#
+# Stage 1: the verdict is posted with GITHUB_TOKEN. That is the defect under
+# test — see README.md.
+
+on:
+  workflow_run:
+    workflows: [execute]
+    types: [completed]
+
+permissions:
+  actions: read
+  statuses: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: prove the workspace holds no pull-request code
+        run: |
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
+          ls -la "$GITHUB_WORKSPACE"
+          if [ -n "$(ls -A "$GITHUB_WORKSPACE")" ]; then echo "workspace NOT empty"; exit 1; fi
+          echo "WORKSPACE_EMPTY=true"
+
+      - name: download the evidence artifact of the triggering run, as data
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: evidence
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/evidence
+
+      - name: reconcile the claim against what the platform recorded
+        id: verdict
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          EVIDENCE_FILE: ${{ runner.temp }}/evidence/evidence.json
+        run: |
+          node - <<'EOF'
+          const fs = require("fs");
+          const crypto = require("crypto");
+          const canon = (v) => JSON.stringify(v, (k, x) =>
+            x && typeof x === "object" && !Array.isArray(x)
+              ? Object.fromEntries(Object.keys(x).sort().map((key) => [key, x[key]]))
+              : x);
+          const reasons = [];
+          let raw = null, evidence = null;
+          try { raw = fs.readFileSync(process.env.EVIDENCE_FILE); } catch { reasons.push("EVIDENCE_ABSENT"); }
+          if (raw) {
+            try { evidence = JSON.parse(raw.toString("utf8")); } catch { reasons.push("EVIDENCE_UNPARSEABLE"); }
+          }
+          if (evidence) {
+            if (evidence.headSha !== process.env.HEAD_SHA) reasons.push("EVIDENCE_FOR_A_DIFFERENT_SHA");
+            const cmds = Array.isArray(evidence.commands) ? evidence.commands : [];
+            if (cmds.length === 0) reasons.push("NO_COMMANDS_RECORDED");
+            for (const c of cmds) if (c.exitCode !== 0) reasons.push("COMMAND_FAILED");
+          }
+          if (process.env.RUN_CONCLUSION !== "success") reasons.push("EXECUTE_RUN_" + String(process.env.RUN_CONCLUSION).toUpperCase());
+          const receipt = {
+            schema: "spike-receipt/1",
+            headSha: process.env.HEAD_SHA,
+            executeRunId: process.env.RUN_ID,
+            executeRunConclusion: process.env.RUN_CONCLUSION,
+            artifactSha256: raw ? crypto.createHash("sha256").update(raw).digest("hex") : null,
+            verdict: reasons.length ? "failure" : "success",
+            reasons: [...new Set(reasons)],
+          };
+          const hash = crypto.createHash("sha256").update(canon(receipt)).digest("hex");
+          console.log(JSON.stringify({ ...receipt, receiptHash: hash }, null, 2));
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `state=${receipt.verdict}\nhash=${hash}\n`);
+          EOF
+
+      - name: post the reconcile status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          STATE: ${{ steps.verdict.outputs.state }}
+          HASH: ${{ steps.verdict.outputs.hash }}
+          TARGET: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state="$STATE" -f context=reconcile \
+            -f description="receipt sha256:$HASH" -f target_url="$TARGET"
