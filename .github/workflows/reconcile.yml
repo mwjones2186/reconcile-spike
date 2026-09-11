@@ -91,12 +91,28 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `state=${receipt.verdict}\nhash=${hash}\n`);
           EOF
 
-      - name: mint a token for the reconcile App
+      # Official GitHub action (owner: the `actions` organisation), pinned to the
+      # full commit of v3.2.0 rather than a movable tag. v3 deprecates app-id in
+      # favour of client-id. The token is scoped to commit statuses only.
+      - name: mint a statuses-only token for the reconcile-verdict App
         id: app
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ vars.RECONCILE_APP_ID }}
+          client-id: ${{ vars.RECONCILE_APP_CLIENT_ID || secrets.RECONCILE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RECONCILE_APP_PRIVATE_KEY }}
+          permission-statuses: write
+
+      # The stored installation id is checked against the one the token was
+      # actually minted for, not trusted. Unset or different fails closed: no
+      # status is posted, and a missing required check blocks the merge.
+      - name: the token belongs to the expected installation
+        env:
+          GOT: ${{ steps.app.outputs.installation-id }}
+          WANT: ${{ vars.RECONCILE_APP_INSTALLATION_ID || secrets.RECONCILE_APP_INSTALLATION_ID }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          echo "app-slug=$SLUG installation-id=$GOT"
+          if [ -z "$WANT" ] || [ "$GOT" != "$WANT" ]; then echo "installation id unset or mismatched (got $GOT)"; exit 1; fi
 
       - name: post the reconcile status as the App
         env:
