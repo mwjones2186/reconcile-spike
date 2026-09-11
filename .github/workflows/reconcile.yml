@@ -12,8 +12,11 @@ name: reconcile
 #   - Attacker-controllable values (branch names, titles) are never interpolated
 #     into a script. Only the head SHA and run id are used, and only via env.
 #
-# Stage 1: the verdict is posted with GITHUB_TOKEN. That is the defect under
-# test — see README.md.
+# Stage 2: the verdict is posted by the reconcile GitHub App. Its private key is
+# an environment secret of `reconcile-signer`, whose deployment branch policy
+# allows only `main` — a pull-request workflow naming the environment is refused
+# the key. Branch protection pins the `reconcile` check to this App, so a status
+# with the same context posted by any other source does not satisfy it.
 
 on:
   workflow_run:
@@ -22,11 +25,11 @@ on:
 
 permissions:
   actions: read
-  statuses: write
 
 jobs:
   reconcile:
     runs-on: ubuntu-latest
+    environment: reconcile-signer
     steps:
       - name: prove the workspace holds no pull-request code
         run: |
@@ -88,9 +91,32 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `state=${receipt.verdict}\nhash=${hash}\n`);
           EOF
 
-      - name: post the reconcile status
+      # Official GitHub action (owner: the `actions` organisation), pinned to the
+      # full commit of v3.2.0 rather than a movable tag. v3 deprecates app-id in
+      # favour of client-id. The token is scoped to commit statuses only.
+      - name: mint a statuses-only token for the reconcile-verdict App
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RECONCILE_APP_CLIENT_ID || secrets.RECONCILE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RECONCILE_APP_PRIVATE_KEY }}
+          permission-statuses: write
+
+      # The stored installation id is checked against the one the token was
+      # actually minted for, not trusted. Unset or different fails closed: no
+      # status is posted, and a missing required check blocks the merge.
+      - name: the token belongs to the expected installation
         env:
-          GH_TOKEN: ${{ github.token }}
+          GOT: ${{ steps.app.outputs.installation-id }}
+          WANT: ${{ vars.RECONCILE_APP_INSTALLATION_ID || secrets.RECONCILE_APP_INSTALLATION_ID }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          echo "app-slug=$SLUG installation-id=$GOT"
+          if [ -z "$WANT" ] || [ "$GOT" != "$WANT" ]; then echo "installation id unset or mismatched (got $GOT)"; exit 1; fi
+
+      - name: post the reconcile status as the App
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           STATE: ${{ steps.verdict.outputs.state }}
           HASH: ${{ steps.verdict.outputs.hash }}
