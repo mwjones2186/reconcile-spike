@@ -12,8 +12,11 @@ name: reconcile
 #   - Attacker-controllable values (branch names, titles) are never interpolated
 #     into a script. Only the head SHA and run id are used, and only via env.
 #
-# Stage 1: the verdict is posted with GITHUB_TOKEN. That is the defect under
-# test — see README.md.
+# Stage 2: the verdict is posted by the reconcile GitHub App. Its private key is
+# an environment secret of `reconcile-signer`, whose deployment branch policy
+# allows only `main` — a pull-request workflow naming the environment is refused
+# the key. Branch protection pins the `reconcile` check to this App, so a status
+# with the same context posted by any other source does not satisfy it.
 
 on:
   workflow_run:
@@ -22,11 +25,11 @@ on:
 
 permissions:
   actions: read
-  statuses: write
 
 jobs:
   reconcile:
     runs-on: ubuntu-latest
+    environment: reconcile-signer
     steps:
       - name: prove the workspace holds no pull-request code
         run: |
@@ -88,9 +91,16 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `state=${receipt.verdict}\nhash=${hash}\n`);
           EOF
 
-      - name: post the reconcile status
+      - name: mint a token for the reconcile App
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.RECONCILE_APP_ID }}
+          private-key: ${{ secrets.RECONCILE_APP_PRIVATE_KEY }}
+
+      - name: post the reconcile status as the App
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           STATE: ${{ steps.verdict.outputs.state }}
           HASH: ${{ steps.verdict.outputs.hash }}
